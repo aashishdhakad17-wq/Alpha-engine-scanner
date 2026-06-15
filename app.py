@@ -8,14 +8,14 @@ import warnings
 warnings.filterwarnings('ignore')
 
 st.set_page_config(page_title="AlphaEngine | Quant Scanner", layout="wide")
-st.title("🚀 AlphaEngine (50-EMA Optimized)")
+st.title("🚀 AlphaEngine (50-EMA & MTF Optimized)")
 st.markdown("---")
 
 # 1. MARKET REGIME CHECK (FAST 50-EMA)
 @st.cache_data(ttl=3600)
 def check_market_regime():
     nifty = yf.download("^NSEI", period="1y", progress=False)
-    # yfinance update fix
+    # yfinance version fix
     if isinstance(nifty.columns, pd.MultiIndex):
         nifty.columns = [col[0] for col in nifty.columns]
         
@@ -32,19 +32,22 @@ regime, close, ema = check_market_regime()
 if regime == "BEARISH":
     st.error(f"🚨 MARKET REGIME: BEARISH (Nifty at {close:.2f} is below 50-EMA {ema:.2f})")
     st.warning("🛡️ SYSTEM IN CASH MODE: No trades to be executed today. Capital is protected.")
-    st.stop() # Code stops here, avoids taking any trades
+    st.stop() # Execution completely stops here
 else:
     st.success(f"🟢 MARKET REGIME: BULLISH (Nifty at {close:.2f} is above 50-EMA {ema:.2f})")
-    st.info("System is scanning for high-probability momentum stocks...")
+    st.info("System is ready to scan the entire Nifty 500 universe for momentum leaders...")
 
 # 2. SCANNER LOGIC (Executes only if Bullish)
 @st.cache_data(ttl=3600)
 def get_stock_data():
-    # Top high-liquidity stocks (Fast Scan)
-    tickers = ['RELIANCE.NS', 'TCS.NS', 'HDFCBANK.NS', 'INFY.NS', 'ICICIBANK.NS', 
-               'SBIN.NS', 'BHARTIARTL.NS', 'ITC.NS', 'L&T.NS', 'BAJFINANCE.NS',
-               'AXISBANK.NS', 'KOTAKBANK.NS', 'TATAMOTORS.NS', 'SUNPHARMA.NS', 
-               'MARUTI.NS', 'NTPC.NS', 'TATASTEEL.NS', 'POWERGRID.NS', 'ASIANPAINT.NS', 'M&M.NS']
+    # Fetch Live Nifty 500 List from NSE
+    try:
+        url = "https://archives.nseindia.com/content/indices/ind_nifty500list.csv"
+        nifty500 = pd.read_csv(url)
+        tickers = [sym + ".NS" for sym in nifty500['Symbol'].tolist()]
+    except:
+        # Emergency Fallback (In case NSE website is slow)
+        tickers = ['RELIANCE.NS', 'TCS.NS', 'HDFCBANK.NS', 'INFY.NS', 'ICICIBANK.NS', 'SBIN.NS', 'BHARTIARTL.NS', 'ITC.NS', 'L&T.NS', 'BAJFINANCE.NS']
     
     df_list = []
     for ticker in tickers:
@@ -87,22 +90,30 @@ def process_and_predict(df):
     # Prediction & Sizing
     latest_df['Alpha_Probability'] = model.predict_proba(latest_df[features])[:, 1]
     
-    # Half-Kelly for Safety
+    # Kelly Criterion
     b_odds = 2.5
     p = latest_df['Alpha_Probability']
     q = 1 - p
     latest_df['Kelly_Fraction'] = ((b_odds * p) - q) / b_odds
-    latest_df['Half_Kelly_Alloc_%'] = (latest_df['Kelly_Fraction'] / 2) * 100
     
-    results = latest_df[['Ticker', 'Close', 'Alpha_Probability', 'Half_Kelly_Alloc_%']].copy()
+    # Capital Calculations
+    latest_df['Base_Kelly_%'] = (latest_df['Kelly_Fraction'] / 2) * 100
+    latest_df['Base_Kelly_%'] = np.where(latest_df['Base_Kelly_%'] < 0, 0, latest_df['Base_Kelly_%'])
+    
+    # MTF 1.5x Logic Added Here
+    latest_df['MTF_Alloc_(1.5x)_%'] = latest_df['Base_Kelly_%'] * 1.5
+    
+    results = latest_df[['Ticker', 'Close', 'Alpha_Probability', 'Base_Kelly_%', 'MTF_Alloc_(1.5x)_%']].copy()
     results['Alpha_Probability'] = (results['Alpha_Probability'] * 100).round(2)
-    results['Half_Kelly_Alloc_%'] = np.where(results['Half_Kelly_Alloc_%'] < 0, 0, results['Half_Kelly_Alloc_%']).round(2)
+    results['Base_Kelly_%'] = results['Base_Kelly_%'].round(2)
+    results['MTF_Alloc_(1.5x)_%'] = results['MTF_Alloc_(1.5x)_%'].round(2)
     
     return results.sort_values(by='Alpha_Probability', ascending=False)
 
 # 3. UI BUTTON
-if st.button("Run Market Scan"):
-    with st.spinner("Analyzing market data..."):
+if st.button("Run Nifty 500 Scan"):
+    # Since 500 stocks take time to download, a spinner shows the progress
+    with st.spinner("Downloading and analyzing Nifty 500 stocks (This will take 2-3 minutes)..."):
         raw_data = get_stock_data()
         predictions = process_and_predict(raw_data)
         
@@ -110,7 +121,15 @@ if st.button("Run Market Scan"):
         
         if not top_picks.empty:
             st.subheader("🔥 Top High-Probability Stocks")
-            st.dataframe(top_picks.style.format({"Close": "₹{:.2f}", "Alpha_Probability": "{:.2f}%", "Half_Kelly_Alloc_%": "{:.2f}%"}))
+            st.dataframe(
+                top_picks.style.format({
+                    "Close": "₹{:.2f}", 
+                    "Alpha_Probability": "{:.2f}%", 
+                    "Base_Kelly_%": "{:.2f}%",
+                    "MTF_Alloc_(1.5x)_%": "{:.2f}%"
+                }),
+                use_container_width=True
+            )
             st.success("Rule: Use Limit Orders near 'Close' price & set a strict 7% GTT Stop-Loss.")
         else:
             st.warning("No stocks met the >65% probability threshold today. Sit tight!")
