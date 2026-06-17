@@ -64,7 +64,15 @@ def get_stock_data():
     return pd.concat(df_list, ignore_index=True)
 
 def process_and_predict(df):
+    def process_and_predict(df):
+    # SAFETY CHECK 1: Agar data hi nahi aaya
+    if df.empty:
+        return pd.DataFrame()
+        
     df = df.sort_values(by=['Ticker', 'Date']).copy()
+    
+    # SAFETY CHECK 2: Yahoo Finance ke khali data (NaN) ko purane data se fill karna
+    df = df.ffill()
     
     # Feature Engineering
     df['Return_1M'] = df.groupby('Ticker')['Close'].pct_change(21)
@@ -81,9 +89,18 @@ def process_and_predict(df):
     train_df = df.dropna(subset=['Target'] + features)
     latest_df = df.groupby('Ticker').tail(1).dropna(subset=features)
     
+    # SAFETY CHECK 3: Agar filter hone ke baad data zero bache, toh crash mat ho
+    if train_df.empty or latest_df.empty:
+        return pd.DataFrame()
+        
     # Model Training
     X_train = train_df[features]
     y_train = train_df['Target']
+    
+    # SAFETY CHECK 4: Agar sabhi stocks target hit na karein
+    if len(y_train.unique()) < 2:
+        return pd.DataFrame()
+
     model = lgb.LGBMClassifier(n_estimators=100, learning_rate=0.05, random_state=42, verbose=-1)
     model.fit(X_train, y_train)
     
@@ -100,7 +117,6 @@ def process_and_predict(df):
     latest_df['Base_Kelly_%'] = (latest_df['Kelly_Fraction'] / 2) * 100
     latest_df['Base_Kelly_%'] = np.where(latest_df['Base_Kelly_%'] < 0, 0, latest_df['Base_Kelly_%'])
     
-    # MTF 1.5x Logic Added Here
     latest_df['MTF_Alloc_(1.5x)_%'] = latest_df['Base_Kelly_%'] * 1.5
     
     results = latest_df[['Ticker', 'Close', 'Alpha_Probability', 'Base_Kelly_%', 'MTF_Alloc_(1.5x)_%']].copy()
@@ -109,7 +125,6 @@ def process_and_predict(df):
     results['MTF_Alloc_(1.5x)_%'] = results['MTF_Alloc_(1.5x)_%'].round(2)
     
     return results.sort_values(by='Alpha_Probability', ascending=False)
-
 # 3. UI BUTTON
 if st.button("Run Nifty 500 Scan"):
     # Since 500 stocks take time to download, a spinner shows the progress
