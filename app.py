@@ -26,16 +26,20 @@ def check_market_regime():
     regime = "BULLISH" if current_close > current_ema else "BEARISH"
     return regime, current_close, current_ema
 
-regime, close, ema = check_market_regime()
+try:
+    regime, close, ema = check_market_regime()
 
-# REGIME FILTER LOGIC
-if regime == "BEARISH":
-    st.error(f"🚨 MARKET REGIME: BEARISH (Nifty at {close:.2f} is below 50-EMA {ema:.2f})")
-    st.warning("🛡️ SYSTEM IN CASH MODE: No trades to be executed today. Capital is protected.")
-    st.stop() # Execution completely stops here
-else:
-    st.success(f"🟢 MARKET REGIME: BULLISH (Nifty at {close:.2f} is above 50-EMA {ema:.2f})")
-    st.info("System is ready to scan the entire Nifty 500 universe for momentum leaders...")
+    # REGIME FILTER LOGIC
+    if regime == "BEARISH":
+        st.error(f"🚨 MARKET REGIME: BEARISH (Nifty at {close:.2f} is below 50-EMA {ema:.2f})")
+        st.warning("🛡️ SYSTEM IN CASH MODE: No trades to be executed today. Capital is protected.")
+        st.stop() # Execution completely stops here
+    else:
+        st.success(f"🟢 MARKET REGIME: BULLISH (Nifty at {close:.2f} is above 50-EMA {ema:.2f})")
+        st.info("System is ready to scan the entire Nifty 500 universe for momentum leaders...")
+except Exception as e:
+    st.error("Market data fetch error from NSE/Yahoo servers. Please refresh in a few minutes.")
+    st.stop()
 
 # 2. SCANNER LOGIC (Executes only if Bullish)
 @st.cache_data(ttl=3600)
@@ -61,16 +65,20 @@ def get_stock_data():
                 df_list.append(df)
         except:
             pass
+            
+    if not df_list:
+        return pd.DataFrame()
+        
     return pd.concat(df_list, ignore_index=True)
 
 def process_and_predict(df):
-    # SAFETY CHECK 1: Agar data hi nahi aaya
+    # SAFETY CHECK 1: If data is completely empty
     if df.empty:
         return pd.DataFrame()
         
     df = df.sort_values(by=['Ticker', 'Date']).copy()
     
-    # SAFETY CHECK 2: Yahoo Finance ke khali data (NaN) ko purane data se fill karna
+    # SAFETY CHECK 2: Forward-fill any NaN garbage values from Yahoo Finance
     df = df.ffill()
     
     # Feature Engineering
@@ -88,7 +96,7 @@ def process_and_predict(df):
     train_df = df.dropna(subset=['Target'] + features)
     latest_df = df.groupby('Ticker').tail(1).dropna(subset=features)
     
-    # SAFETY CHECK 3: Agar filter hone ke baad data zero bache, toh crash mat ho
+    # SAFETY CHECK 3: If filtering drops all rows
     if train_df.empty or latest_df.empty:
         return pd.DataFrame()
         
@@ -96,7 +104,7 @@ def process_and_predict(df):
     X_train = train_df[features]
     y_train = train_df['Target']
     
-    # SAFETY CHECK 4: Agar sabhi stocks target hit na karein
+    # SAFETY CHECK 4: If target only has 1 class (prevents LGBM ValueError)
     if len(y_train.unique()) < 2:
         return pd.DataFrame()
 
@@ -116,6 +124,7 @@ def process_and_predict(df):
     latest_df['Base_Kelly_%'] = (latest_df['Kelly_Fraction'] / 2) * 100
     latest_df['Base_Kelly_%'] = np.where(latest_df['Base_Kelly_%'] < 0, 0, latest_df['Base_Kelly_%'])
     
+    # MTF 1.5x Logic Added Here
     latest_df['MTF_Alloc_(1.5x)_%'] = latest_df['Base_Kelly_%'] * 1.5
     
     results = latest_df[['Ticker', 'Close', 'Alpha_Probability', 'Base_Kelly_%', 'MTF_Alloc_(1.5x)_%']].copy()
@@ -124,3 +133,29 @@ def process_and_predict(df):
     results['MTF_Alloc_(1.5x)_%'] = results['MTF_Alloc_(1.5x)_%'].round(2)
     
     return results.sort_values(by='Alpha_Probability', ascending=False)
+
+# 3. UI BUTTON
+if st.button("Run Nifty 500 Scan"):
+    with st.spinner("Downloading and analyzing Nifty 500 stocks (This will take 2-3 minutes)..."):
+        raw_data = get_stock_data()
+        predictions = process_and_predict(raw_data)
+        
+        if predictions.empty:
+            st.error("Market data processing failed due to missing server data. Please try again later.")
+        else:
+            top_picks = predictions[predictions['Alpha_Probability'] > 65.0]
+            
+            if not top_picks.empty:
+                st.subheader("🔥 Top High-Probability Stocks")
+                st.dataframe(
+                    top_picks.style.format({
+                        "Close": "₹{:.2f}", 
+                        "Alpha_Probability": "{:.2f}%", 
+                        "Base_Kelly_%": "{:.2f}%",
+                        "MTF_Alloc_(1.5x)_%": "{:.2f}%"
+                    }),
+                    use_container_width=True
+                )
+                st.success("Rule: Use Limit Orders near 'Close' price & set a strict 7% GTT Stop-Loss.")
+            else:
+                st.warning("No stocks met the >65% probability threshold today. Sit tight!")
