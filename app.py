@@ -64,7 +64,6 @@ def get_stock_data():
     return pd.concat(df_list, ignore_index=True)
 
 def process_and_predict(df):
-    def process_and_predict(df):
     # SAFETY CHECK 1: Agar data hi nahi aaya
     if df.empty:
         return pd.DataFrame()
@@ -125,26 +124,3 @@ def process_and_predict(df):
     results['MTF_Alloc_(1.5x)_%'] = results['MTF_Alloc_(1.5x)_%'].round(2)
     
     return results.sort_values(by='Alpha_Probability', ascending=False)
-# 3. UI BUTTON
-if st.button("Run Nifty 500 Scan"):
-    # Since 500 stocks take time to download, a spinner shows the progress
-    with st.spinner("Downloading and analyzing Nifty 500 stocks (This will take 2-3 minutes)..."):
-        raw_data = get_stock_data()
-        predictions = process_and_predict(raw_data)
-        
-        top_picks = predictions[predictions['Alpha_Probability'] > 65.0]
-        
-        if not top_picks.empty:
-            st.subheader("🔥 Top High-Probability Stocks")
-            st.dataframe(
-                top_picks.style.format({
-                    "Close": "₹{:.2f}", 
-                    "Alpha_Probability": "{:.2f}%", 
-                    "Base_Kelly_%": "{:.2f}%",
-                    "MTF_Alloc_(1.5x)_%": "{:.2f}%"
-                }),
-                use_container_width=True
-            )
-            st.success("Rule: Use Limit Orders near 'Close' price & set a strict 7% GTT Stop-Loss.")
-        else:
-            st.warning("No stocks met the >65% probability threshold today. Sit tight!")
