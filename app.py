@@ -7,15 +7,16 @@ import warnings
 
 warnings.filterwarnings('ignore')
 
-st.set_page_config(page_title="AlphaEngine | Quant Scanner", layout="wide")
-st.title("🚀 AlphaEngine (50-EMA & MTF Optimized)")
+st.set_page_config(page_title="AlphaEngine | Master Quant Scanner", layout="wide")
+st.title("🚀 AlphaEngine (The Master Edition)")
 st.markdown("---")
 
+# ==========================================
 # 1. MARKET REGIME CHECK (FAST 50-EMA)
+# ==========================================
 @st.cache_data(ttl=3600)
 def check_market_regime():
     nifty = yf.download("^NSEI", period="1y", progress=False)
-    # yfinance version fix
     if isinstance(nifty.columns, pd.MultiIndex):
         nifty.columns = [col[0] for col in nifty.columns]
         
@@ -28,30 +29,28 @@ def check_market_regime():
 
 try:
     regime, close, ema = check_market_regime()
-
-    # REGIME FILTER LOGIC
     if regime == "BEARISH":
         st.error(f"🚨 MARKET REGIME: BEARISH (Nifty at {close:.2f} is below 50-EMA {ema:.2f})")
-        st.warning("🛡️ SYSTEM IN CASH MODE: No trades to be executed today. Capital is protected.")
-        st.stop() # Execution completely stops here
+        st.warning("🛡️ SYSTEM IN CASH MODE: Market is highly unstable. Capital protection active. No trades today.")
+        st.stop() # Stops execution if market is bad
     else:
         st.success(f"🟢 MARKET REGIME: BULLISH (Nifty at {close:.2f} is above 50-EMA {ema:.2f})")
-        st.info("System is ready to scan the entire Nifty 500 universe for momentum leaders...")
+        st.info("System is ready. All safety locks (No Falling Knives, Data Error Handling) are active.")
 except Exception as e:
-    st.error("Market data fetch error from NSE/Yahoo servers. Please refresh in a few minutes.")
+    st.error("Market data fetch error from servers. Please refresh the page.")
     st.stop()
 
-# 2. SCANNER LOGIC (Executes only if Bullish)
+# ==========================================
+# 2. DATA FETCHING (NIFTY 500)
+# ==========================================
 @st.cache_data(ttl=3600)
 def get_stock_data():
-    # Fetch Live Nifty 500 List from NSE
     try:
         url = "https://archives.nseindia.com/content/indices/ind_nifty500list.csv"
         nifty500 = pd.read_csv(url)
         tickers = [sym + ".NS" for sym in nifty500['Symbol'].tolist()]
     except:
-        # Emergency Fallback (In case NSE website is slow)
-        tickers = ['RELIANCE.NS', 'TCS.NS', 'HDFCBANK.NS', 'INFY.NS', 'ICICIBANK.NS', 'SBIN.NS', 'BHARTIARTL.NS', 'ITC.NS', 'L&T.NS', 'BAJFINANCE.NS']
+        tickers = ['RELIANCE.NS', 'TCS.NS', 'HDFCBANK.NS', 'INFY.NS', 'ICICIBANK.NS', 'SBIN.NS']
     
     df_list = []
     for ticker in tickers:
@@ -68,18 +67,17 @@ def get_stock_data():
             
     if not df_list:
         return pd.DataFrame()
-        
     return pd.concat(df_list, ignore_index=True)
 
+# ==========================================
+# 3. CORE QUANT LOGIC & PREDICTION
+# ==========================================
 def process_and_predict(df):
-    # SAFETY CHECK 1: If data is completely empty
     if df.empty:
         return pd.DataFrame()
         
     df = df.sort_values(by=['Ticker', 'Date']).copy()
-    
-    # SAFETY CHECK 2: Forward-fill any NaN garbage values from Yahoo Finance
-    df = df.ffill()
+    df = df.ffill() # Fixes Yahoo Finance missing data bugs
     
     # Feature Engineering
     df['Return_1M'] = df.groupby('Ticker')['Close'].pct_change(21)
@@ -88,6 +86,7 @@ def process_and_predict(df):
     df['SMA_200'] = df.groupby('Ticker')['Close'].transform(lambda x: x.rolling(200).mean())
     df['Dist_SMA200'] = (df['Close'] / df['SMA_200']) - 1
     
+    # Target for AI (2% in 21 Days)
     df['Fwd_Return_21D'] = df.groupby('Ticker')['Close'].shift(-21) / df['Close'] - 1
     df['Target'] = np.where(df['Fwd_Return_21D'] > 0.02, 1, 0)
     
@@ -96,35 +95,29 @@ def process_and_predict(df):
     train_df = df.dropna(subset=['Target'] + features)
     latest_df = df.groupby('Ticker').tail(1).dropna(subset=features)
     
-    # SAFETY CHECK 3: If filtering drops all rows
-    if train_df.empty or latest_df.empty:
+    # 🛑 STRICT MOMENTUM FILTER (REMOVES FALLING KNIVES LIKE ZENSARTECH)
+    latest_df = latest_df[(latest_df['Dist_SMA200'] > 0) & (latest_df['Return_1M'] > 0)]
+    
+    if train_df.empty or latest_df.empty or len(train_df['Target'].unique()) < 2:
         return pd.DataFrame()
         
     # Model Training
     X_train = train_df[features]
     y_train = train_df['Target']
-    
-    # SAFETY CHECK 4: If target only has 1 class (prevents LGBM ValueError)
-    if len(y_train.unique()) < 2:
-        return pd.DataFrame()
-
     model = lgb.LGBMClassifier(n_estimators=100, learning_rate=0.05, random_state=42, verbose=-1)
     model.fit(X_train, y_train)
     
-    # Prediction & Sizing
+    # Prediction
     latest_df['Alpha_Probability'] = model.predict_proba(latest_df[features])[:, 1]
     
-    # Kelly Criterion
+    # Sizing (Kelly & MTF 1.5x)
     b_odds = 2.5
     p = latest_df['Alpha_Probability']
     q = 1 - p
     latest_df['Kelly_Fraction'] = ((b_odds * p) - q) / b_odds
     
-    # Capital Calculations
     latest_df['Base_Kelly_%'] = (latest_df['Kelly_Fraction'] / 2) * 100
     latest_df['Base_Kelly_%'] = np.where(latest_df['Base_Kelly_%'] < 0, 0, latest_df['Base_Kelly_%'])
-    
-    # MTF 1.5x Logic Added Here
     latest_df['MTF_Alloc_(1.5x)_%'] = latest_df['Base_Kelly_%'] * 1.5
     
     results = latest_df[['Ticker', 'Close', 'Alpha_Probability', 'Base_Kelly_%', 'MTF_Alloc_(1.5x)_%']].copy()
@@ -134,19 +127,22 @@ def process_and_predict(df):
     
     return results.sort_values(by='Alpha_Probability', ascending=False)
 
-# 3. UI BUTTON
-if st.button("Run Nifty 500 Scan"):
-    with st.spinner("Downloading and analyzing Nifty 500 stocks (This will take 2-3 minutes)..."):
+# ==========================================
+# 4. USER INTERFACE
+# ==========================================
+if st.button("Run Master Scan"):
+    with st.spinner("Crunching Nifty 500 data & Filtering falling knives... (Takes 2-3 mins)"):
         raw_data = get_stock_data()
         predictions = process_and_predict(raw_data)
         
         if predictions.empty:
-            st.error("Market data processing failed due to missing server data. Please try again later.")
+            st.error("Market data processing failed. The market might be closed or data servers are down.")
         else:
+            # Final output threshold
             top_picks = predictions[predictions['Alpha_Probability'] > 65.0]
             
             if not top_picks.empty:
-                st.subheader("🔥 Top High-Probability Stocks")
+                st.subheader("🔥 Ultra-Filtered High-Probability Stocks")
                 st.dataframe(
                     top_picks.style.format({
                         "Close": "₹{:.2f}", 
@@ -156,6 +152,6 @@ if st.button("Run Nifty 500 Scan"):
                     }),
                     use_container_width=True
                 )
-                st.success("Rule: Use Limit Orders near 'Close' price & set a strict 7% GTT Stop-Loss.")
+                st.success("Rule: Execute Limit Orders at 'Close' price & set a strict 7% GTT Stop-Loss in your broker.")
             else:
-                st.warning("No stocks met the >65% probability threshold today. Sit tight!")
+                st.warning("No stocks passed the strict momentum and probability checks today. Sit tight!")
